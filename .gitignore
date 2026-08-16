@@ -25,9 +25,5 @@ Thumbs.db
 .cache/
 huggingface/
 
-# Generated data
-data/raw/
-data/processed/
-
-# Local Streamlit files
+# Streamlit secrets
 .streamlit/secrets.toml
