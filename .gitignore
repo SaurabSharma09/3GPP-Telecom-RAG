@@ -27,3 +27,7 @@ huggingface/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Local source and intermediate 3GPP data
+data/raw/
+data/processed/3gpp/
