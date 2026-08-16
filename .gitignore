@@ -1,0 +1,33 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# IDE
+.idea/
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Model/cache files
+.cache/
+huggingface/
+
+# Generated data
+data/raw/
+data/processed/
+
+# Local Streamlit files
+.streamlit/secrets.toml
