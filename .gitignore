@@ -31,3 +31,11 @@ huggingface/
 # Local source and intermediate 3GPP data
 data/raw/
 data/processed/3gpp/
+
+# Local source and intermediate 3GPP data
+data/raw/
+data/processed/3gpp/
+
+# Generated RAG chunks and indexes
+data/processed/chunks/
+data/processed/vector_store/
