@@ -3,506 +3,581 @@ import json
 import re
 
 from docx import Document
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
+
+# ============================================================================
+# DIRECTORIES
+# ============================================================================
 
 RAW_DIR = Path("data/raw/3gpp")
 PROCESSED_DIR = Path("data/processed/3gpp")
 
 
+# ============================================================================
+# TEXT UTILITIES
+# ============================================================================
+
+
 def clean_text(text: str) -> str:
-    """Clean whitespace without removing meaningful content."""
+    """Normalize whitespace while preserving meaningful technical content."""
+
+    if not text:
+        return ""
+
+    text = str(text)
 
     text = text.replace("\xa0", " ")
     text = text.replace("\t", " ")
 
-    text = re.sub(r"[ ]{2,}", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    # Convert line breaks inside headings/content into spaces where
+    # appropriate, while still retaining paragraph boundaries externally.
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n+", " ", text)
 
     return text.strip()
+
+
+# ============================================================================
+# SECTION DETECTION
+# ============================================================================
 
 
 def extract_section_info(text: str):
     """
     Extract an explicit 3GPP section number and title.
 
-    Examples:
+    Supported examples:
+
         1 Scope
         4.2 Architecture reference model
         4.2.2 Network Functions and entities
         4.2.5a Radio Capabilities Signalling optimisation
+        Annex F (informative): Redundant user plane paths
 
-    Returns:
-        (section_number, title)
-
-    If the heading does not contain an explicit section
-    number, section_number is None.
+    The Annex title may contain line breaks in the source DOCX.
     """
 
     text = clean_text(text)
 
     pattern = (
         r"^("
-        r"\d+"
-        r"(?:\.\d+)*"
-        r"[A-Za-z]?"
+        r"Annex\s+[A-Za-z]+"
+        r"|"
+        r"\d+(?:\.\d+)*[A-Za-z]?"
         r")"
-        r"\s+"
-        r"(.+)$"
+        r"(?:\s*:\s*|\s+)"
+        r"([\s\S]+)$"
     )
 
-    match = re.match(
-        pattern,
-        text
-    )
+    match = re.match(pattern, text)
 
     if not match:
         return None, text
 
-    return (
-        match.group(1),
-        match.group(2).strip()
-    )
+    section_number = match.group(1).strip()
+    title = clean_text(match.group(2))
+
+    return section_number, title
 
 
-def is_heading(paragraph) -> bool:
-    """Check whether paragraph is a real document heading."""
+def is_heading(paragraph: Paragraph) -> bool:
+    """Return True when the DOCX paragraph uses a Heading style."""
 
-    style = paragraph.style.name
+    style = paragraph.style.name or ""
 
-    return style.startswith(
-        "Heading "
-    )
+    return style.startswith("Heading ")
 
 
-def get_heading_level(paragraph) -> int:
-    """Convert Heading 1 → 1, Heading 2 → 2, etc."""
+def get_heading_level(paragraph: Paragraph) -> int:
+    """Convert Heading 1 -> 1, Heading 2 -> 2, etc."""
 
-    match = re.match(
-        r"Heading\s+(\d+)",
-        paragraph.style.name
-    )
+    style = paragraph.style.name or ""
+
+    match = re.match(r"Heading\s+(\d+)", style)
 
     if match:
-        return int(
-            match.group(1)
-        )
+        return int(match.group(1))
 
     return 0
 
 
-def build_parent_section(
-    section_stack,
-    level
-):
+def detect_section_type(section_number, title=""):
     """
-    Find the nearest numbered parent section.
+    Classify section metadata.
 
-    Example:
-
-        4
-        └── 4.2
-            └── 4.2.1
-                └── unnumbered heading
-
-    The unnumbered heading receives:
-
-        parent_section = 4.2.1
+    Values:
+        cover
+        numbered
+        annex
+        unnumbered
     """
 
-    for previous_level in range(
-        level - 1,
-        0,
-        -1
-    ):
+    if section_number and str(section_number).lower().startswith("annex "):
+        return "annex"
 
-        parent = section_stack.get(
-            previous_level
-        )
+    if section_number:
+        return "numbered"
 
-        if parent is None:
+    return "unnumbered"
+
+
+# ============================================================================
+# SECTION HIERARCHY
+# ============================================================================
+
+
+def build_parent_section(section_stack, level):
+    """Find the nearest numbered parent section."""
+
+    for previous_level in sorted(section_stack.keys(), reverse=True):
+
+        if previous_level >= level:
             continue
 
-        if parent.get(
-            "section_number"
-        ):
+        parent = section_stack[previous_level]
 
-            return parent[
-                "section_number"
-            ]
+        if parent.get("section_number"):
+            return parent["section_number"]
 
     return None
 
 
-def extract_document(
-    file_path: Path
-) -> dict:
+def build_section_path(section_stack, level, current_number, current_title):
+    """
+    Build the full logical section path.
 
-    document = Document(
-        file_path
-    )
+    Example:
+        5.3 Registration and Connection Management
+        5.3.2 Registration Management
+        5.3.2.1 General
+    """
 
-    sections = []
+    path = []
 
-    current_section = None
+    for previous_level in sorted(section_stack.keys()):
 
-    started = False
-
-    # Stores the latest section at each
-    # heading level.
-    section_stack = {}
-
-    for index, paragraph in enumerate(
-        document.paragraphs
-    ):
-
-        text = clean_text(
-            paragraph.text
-        )
-
-        if not text:
+        if previous_level >= level:
             continue
 
-        style = paragraph.style.name
+        parent = section_stack[previous_level]
 
-        # --------------------------------------------------
-        # Ignore Table of Contents
-        # --------------------------------------------------
-
-        if style.lower().startswith(
-            "toc"
-        ):
+        if not parent.get("section_number"):
             continue
 
-        # Ignore Contents heading
-        if text.lower() == "contents":
-            continue
+        path.append(f"{parent['section_number']} " f"{parent['title']}")
 
-        # --------------------------------------------------
-        # Start from Foreword
-        # --------------------------------------------------
+    if current_number:
+        path.append(f"{current_number} " f"{current_title}")
+    elif current_title:
+        path.append(current_title)
 
-        if not started:
+    return path
 
-            if text.lower() == "foreword":
-                started = True
-            else:
-                continue
 
-        # --------------------------------------------------
-        # Heading
-        # --------------------------------------------------
+# ============================================================================
+# TABLE EXTRACTION
+# ============================================================================
 
-        if is_heading(paragraph):
 
-            level = get_heading_level(
-                paragraph
-            )
+def table_to_text(rows) -> str:
+    """
+    Convert a DOCX table into searchable text.
 
-            section_number, title = (
-                extract_section_info(
-                    text
-                )
-            )
+    When the first row behaves like a header, subsequent rows are represented
+    as key/value pairs to improve BM25 and embedding retrieval.
+    """
 
-            # Find nearest numbered parent.
-            parent_section = (
-                build_parent_section(
-                    section_stack,
-                    level
-                )
-            )
+    cleaned_rows = []
 
-            current_section = {
+    for row in rows:
 
-                "section_number":
-                    section_number,
+        cleaned = [clean_text(cell) for cell in row if clean_text(cell)]
 
-                "title":
-                    title,
+        if cleaned:
+            cleaned_rows.append(cleaned)
 
-                "level":
-                    level,
+    if not cleaned_rows:
+        return ""
 
-                "parent_section":
-                    parent_section,
+    header = cleaned_rows[0]
 
-                "paragraph_index":
-                    index,
+    if len(cleaned_rows) > 1 and len(header) > 1:
 
-                "content":
-                    []
-            }
+        lines = []
 
-            sections.append(
-                current_section
-            )
+        for row in cleaned_rows[1:]:
 
-            # Update section stack.
-            section_stack[level] = (
-                current_section
-            )
+            pairs = []
 
-            # Remove deeper levels because
-            # they no longer belong to the
-            # current hierarchy.
-            deeper_levels = [
-                key
-                for key in section_stack
-                if key > level
-            ]
+            for index, value in enumerate(row):
 
-            for key in deeper_levels:
-                del section_stack[key]
+                if index < len(header):
 
-        # --------------------------------------------------
-        # Content
-        # --------------------------------------------------
+                    pairs.append(f"{header[index]}: {value}")
 
-        else:
+                else:
 
-            if current_section is not None:
+                    pairs.append(value)
 
-                current_section[
-                    "content"
-                ].append({
+            if pairs:
+                lines.append(" | ".join(pairs))
 
-                    "text": text,
+        return "\n".join(lines)
 
-                    "style": style,
+    return "\n".join(" | ".join(row) for row in cleaned_rows)
 
-                    "paragraph_index":
-                        index
-                })
 
-    # ------------------------------------------------------
-    # Build section text
-    # ------------------------------------------------------
+def extract_table(table: Table, table_index: int, current_section: dict):
+    """Extract a table and preserve its parent section context."""
 
-    for section in sections:
+    rows = []
 
-        section["text"] = "\n".join(
-            item["text"]
-            for item in section[
-                "content"
-            ]
-        )
+    for row in table.rows:
 
-    # ------------------------------------------------------
-    # Extract tables
-    # ------------------------------------------------------
+        cells = [clean_text(cell.text) for cell in row.cells]
+
+        rows.append(cells)
+
+    return {
+        "table_index": table_index,
+        "rows": rows,
+        "text": table_to_text(rows),
+        "section_number": (
+            current_section.get("section_number") if current_section else "Cover"
+        ),
+        "section_title": (
+            current_section.get("title") if current_section else "Document Metadata"
+        ),
+        "parent_section": (
+            current_section.get("parent_section") if current_section else None
+        ),
+        "section_path": (
+            current_section.get("section_path", []) if current_section else ["Cover"]
+        ),
+        "section_type": (
+            current_section.get("section_type") if current_section else "cover"
+        ),
+    }
+
+
+# ============================================================================
+# DOCUMENT EXTRACTION
+# ============================================================================
+
+
+def extract_document(file_path: Path) -> dict:
+    """
+    Extract a 3GPP DOCX into structured JSON.
+
+    Preserves:
+
+        - cover/document metadata
+        - section numbers and titles
+        - section hierarchy
+        - parent sections
+        - section paths
+        - Annexes
+        - paragraphs
+        - tables
+        - table -> section relationship
+        - specification/release/version metadata
+
+    Page numbers are intentionally not inferred from DOCX.
+    """
+
+    document = Document(file_path)
+
+    # ------------------------------------------------------------------------
+    # COVER
+    # ------------------------------------------------------------------------
+
+    cover_section = {
+        "section_number": "Cover",
+        "title": "Document Metadata",
+        "level": 0,
+        "parent_section": None,
+        "section_path": ["Cover"],
+        "section_type": "cover",
+        "paragraph_index": -1,
+        "content": [],
+        "tables": [],
+        "text": "",
+    }
+
+    sections = [cover_section]
+
+    current_section = cover_section
+
+    section_stack = {0: cover_section}
 
     tables = []
 
-    for table_index, table in enumerate(
-        document.tables
-    ):
+    paragraph_index = 0
+    table_index = 0
 
-        rows = []
+    # ------------------------------------------------------------------------
+    # ONE DOCUMENT-BODY PASS
+    #
+    # This is the important improvement:
+    # paragraphs and tables are processed in the real DOCX order.
+    # Therefore a table immediately following a heading is attached to that
+    # section correctly.
+    # ------------------------------------------------------------------------
 
-        for row in table.rows:
+    for child in document.element.body.iterchildren():
 
-            cells = [
-                clean_text(
-                    cell.text
+        # Ignore section properties.
+        if child.tag.endswith("}sectPr"):
+            continue
+
+        # ====================================================================
+        # PARAGRAPH
+        # ====================================================================
+
+        if child.tag.endswith("}p"):
+
+            paragraph = Paragraph(child, document)
+
+            text = clean_text(paragraph.text)
+
+            current_index = paragraph_index
+
+            paragraph_index += 1
+
+            if not text:
+                continue
+
+            style = paragraph.style.name or ""
+
+            # Skip TOC paragraphs.
+            if style.lower().startswith("toc"):
+                continue
+
+            if text.lower() == "contents":
+                continue
+
+            # ---------------------------------------------------------------
+            # HEADING
+            # ---------------------------------------------------------------
+
+            if is_heading(paragraph):
+
+                level = get_heading_level(paragraph)
+
+                section_number, title = extract_section_info(text)
+
+                section_type = detect_section_type(section_number, title)
+
+                # Annexes are logical top-level sections.
+                if section_type == "annex":
+
+                    effective_level = 1
+
+                    parent_section = None
+
+                    section_stack = {}
+
+                else:
+
+                    effective_level = level
+
+                    parent_section = build_parent_section(
+                        section_stack, effective_level
+                    )
+
+                section_path = build_section_path(
+                    section_stack, effective_level, section_number, title
                 )
-                for cell in row.cells
-            ]
 
-            rows.append(
-                cells
-            )
+                current_section = {
+                    "section_number": section_number,
+                    "title": title,
+                    "level": effective_level,
+                    "parent_section": parent_section,
+                    "section_path": section_path,
+                    "section_type": section_type,
+                    "paragraph_index": current_index,
+                    "content": [],
+                    "tables": [],
+                    "text": "",
+                }
 
-        tables.append({
+                sections.append(current_section)
 
-            "table_index":
-                table_index,
+                section_stack[effective_level] = current_section
 
-            "rows":
-                rows
-        })
+                # Remove deeper hierarchy levels.
+                deeper_levels = [key for key in section_stack if key > effective_level]
 
-    # ------------------------------------------------------
-    # Determine specification
-    # ------------------------------------------------------
+                for key in deeper_levels:
+                    del section_stack[key]
 
-    spec_match = re.search(
-        r"(\d{5})",
-        file_path.stem
-    )
+            # ---------------------------------------------------------------
+            # NORMAL CONTENT
+            # ---------------------------------------------------------------
 
-    specification = (
-        spec_match.group(1)
-        if spec_match
-        else file_path.stem
-    )
+            else:
 
-    # ------------------------------------------------------
-    # Final document object
-    # ------------------------------------------------------
+                current_section["content"].append(
+                    {"text": text, "style": style, "paragraph_index": current_index}
+                )
+
+        # ====================================================================
+        # TABLE
+        # ====================================================================
+
+        elif child.tag.endswith("}tbl"):
+
+            table = Table(child, document)
+
+            record = extract_table(table, table_index, current_section)
+
+            tables.append(record)
+
+            current_section["tables"].append(table_index)
+
+            table_index += 1
+
+    # ------------------------------------------------------------------------
+    # BUILD SECTION TEXT
+    # ------------------------------------------------------------------------
+
+    for section in sections:
+
+        section["text"] = "\n".join(item["text"] for item in section.get("content", []))
+
+    # ------------------------------------------------------------------------
+    # SPECIFICATION
+    # ------------------------------------------------------------------------
+
+    spec_match = re.search(r"(?<!\d)(\d{5})(?!\d)", file_path.stem)
+
+    if spec_match:
+
+        specification_number = spec_match.group(1)
+
+    else:
+
+        specification_number = file_path.stem
+
+    if len(specification_number) == 5 and specification_number.isdigit():
+
+        specification = f"TS {specification_number[:2]}." f"{specification_number[2:]}"
+
+    else:
+
+        specification = specification_number
+
+    # ------------------------------------------------------------------------
+    # STATISTICS
+    # ------------------------------------------------------------------------
+
+    statistics = {
+        "total_paragraphs": len(document.paragraphs),
+        "total_sections": len(sections),
+        "total_tables": len(tables),
+        "numbered_sections": sum(
+            1 for section in sections if section.get("section_type") == "numbered"
+        ),
+        "unnumbered_sections": sum(
+            1 for section in sections if section.get("section_type") == "unnumbered"
+        ),
+        "annex_sections": sum(
+            1 for section in sections if section.get("section_type") == "annex"
+        ),
+        "cover_sections": sum(
+            1 for section in sections if section.get("section_type") == "cover"
+        ),
+    }
+
+    # ------------------------------------------------------------------------
+    # FINAL OBJECT
+    # ------------------------------------------------------------------------
 
     return {
-
         "document": {
-
-            "filename":
-                file_path.name,
-
-            "specification":
-                f"TS {specification[:2]}."
-                f"{specification[2:]}",
-
-            "release":
-                "19",
-
-            "version":
-                "19.6.0"
+            "filename": file_path.name,
+            "specification": specification,
+            "release": "19",
+            "version": "19.6.0",
+            "source_type": "DOCX",
         },
-
-        "statistics": {
-
-            "total_paragraphs":
-                len(
-                    document.paragraphs
-                ),
-
-            "total_sections":
-                len(sections),
-
-            "total_tables":
-                len(tables)
-        },
-
-        "sections":
-            sections,
-
-        "tables":
-            tables
+        "statistics": statistics,
+        "sections": sections,
+        "tables": tables,
     }
+
+
+# ============================================================================
+# MAIN
+# ============================================================================
 
 
 def main():
 
-    PROCESSED_DIR.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(
-        RAW_DIR.glob(
-            "*.docx"
-        )
-    )
+    files = sorted(RAW_DIR.glob("*.docx"))
 
     if not files:
 
-        print(
-            "No DOCX files found."
-        )
+        print("No DOCX files found.")
+
+        print(f"Expected directory: " f"{RAW_DIR.resolve()}")
 
         return
 
     print("=" * 80)
-    print(
-        "3GPP DOCUMENT INGESTION"
-    )
+    print("3GPP DOCUMENT INGESTION")
     print("=" * 80)
 
     for file_path in files:
 
-        print(
-            f"\nProcessing: "
-            f"{file_path.name}"
-        )
+        print(f"\nProcessing: " f"{file_path.name}")
 
         try:
 
-            result = extract_document(
-                file_path
-            )
+            result = extract_document(file_path)
 
-            output_name = (
-                file_path.stem
-                + ".json"
-            )
+            output_file = PROCESSED_DIR / f"{file_path.stem}.json"
 
-            output_file = (
-                PROCESSED_DIR
-                / output_name
-            )
+            with open(output_file, "w", encoding="utf-8") as file:
 
-            with open(
-                output_file,
-                "w",
-                encoding="utf-8"
-            ) as file:
+                json.dump(result, file, indent=2, ensure_ascii=False)
 
-                json.dump(
-                    result,
-                    file,
-                    indent=2,
-                    ensure_ascii=False
-                )
+            print(f"  Sections      : " f"{result['statistics']['total_sections']}")
+
+            print(f"  Numbered      : " f"{result['statistics']['numbered_sections']}")
 
             print(
-                f"  Sections : "
-                f"{result['statistics']['total_sections']}"
+                f"  Unnumbered    : " f"{result['statistics']['unnumbered_sections']}"
             )
 
-            print(
-                f"  Tables   : "
-                f"{result['statistics']['total_tables']}"
-            )
+            print(f"  Tables        : " f"{result['statistics']['total_tables']}")
 
-            # Show how many sections have
-            # explicit section numbers.
-            numbered = sum(
-                1
-                for section
-                in result["sections"]
-                if section[
-                    "section_number"
-                ] is not None
-            )
+            print(f"  Annexes       : " f"{result['statistics']['annex_sections']}")
 
-            unnumbered = (
-                len(result["sections"])
-                - numbered
-            )
+            print(f"  Cover         : " f"{result['statistics']['cover_sections']}")
 
-            print(
-                f"  Numbered : "
-                f"{numbered}"
-            )
+            print(f"  Specification : " f"{result['document']['specification']}")
 
-            print(
-                f"  Unnumbered: "
-                f"{unnumbered}"
-            )
+            print(f"  Release       : " f"{result['document']['release']}")
 
-            print(
-                f"  Output   : "
-                f"{output_file}"
-            )
+            print(f"  Version       : " f"{result['document']['version']}")
+
+            print(f"  Output        : " f"{output_file}")
 
         except Exception as error:
 
-            print(
-                f"  ERROR: "
-                f"{error}"
-            )
+            print(f"  ERROR: {error}")
 
-    print(
-        "\n"
-        + "=" * 80
-    )
+    print("\n" + "=" * 80)
 
-    print(
-        "INGESTION COMPLETE"
-    )
+    print("INGESTION COMPLETE")
 
-    print(
-        "=" * 80
-    )
+    print("=" * 80)
 
 
 if __name__ == "__main__":

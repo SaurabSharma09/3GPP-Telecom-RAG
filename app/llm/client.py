@@ -11,28 +11,26 @@ class LLMClient:
         api_key = os.getenv("GROQ_API_KEY")
 
         if not api_key:
-            raise RuntimeError(
-                "GROQ_API_KEY environment variable is not set."
-            )
 
-        self.client = Groq(
-            api_key=api_key
-        )
+            raise RuntimeError("GROQ_API_KEY environment variable " "is not set.")
 
-        # You can change this later.
-        self.model = os.getenv(
-            "GROQ_MODEL",
-            "llama-3.3-70b-versatile"
-        )
+        self.client = Groq(api_key=api_key)
+
+        # Use GROQ_MODEL when explicitly configured.
+        # Otherwise use the current supported model.
+        self.model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+
+        print(f"LLMClient ready: {self.model}")
 
     def generate(self, prompt):
 
+        if not prompt or not str(prompt).strip():
+
+            raise ValueError("Prompt cannot be empty.")
+
         response = self.client.chat.completions.create(
-
             model=self.model,
-
             temperature=0,
-
             messages=[
                 {
                     "role": "system",
@@ -41,35 +39,27 @@ class LLMClient:
                         "system. Use ONLY the evidence supplied "
                         "in the user message. Never use outside "
                         "knowledge. Never invent facts."
-                    )
+                    ),
                 },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "user", "content": prompt},
             ],
-
-            response_format={
-                "type": "json_object"
-            }
+            response_format={"type": "json_object"},
         )
 
-        content = (
-            response
-            .choices[0]
-            .message
-            .content
-        )
+        if not response.choices:
+
+            raise RuntimeError("Groq returned no completion choices.")
+
+        content = response.choices[0].message.content
+
+        if not content or not content.strip():
+
+            raise RuntimeError("Groq returned an empty response.")
 
         try:
 
-            return json.loads(
-                content
-            )
+            return json.loads(content)
 
         except json.JSONDecodeError as error:
 
-            raise RuntimeError(
-                "Groq returned invalid JSON: "
-                f"{content}"
-            ) from error
+            raise RuntimeError("Groq returned invalid JSON: " f"{content}") from error
